@@ -3,9 +3,11 @@ import io
 from langchain.prompts import PromptTemplate
 from langchain.chains.question_answering import load_qa_chain
 from langchain.text_splitter import RecursiveCharacterTextSplitter
-from langchain.vectorstores import MongoDBAtlasVectorSearch
+from langchain_community.vectorstores import MongoDBAtlasVectorSearch
 from langchain_google_genai import GoogleGenerativeAIEmbeddings, ChatGoogleGenerativeAI
 from langchain.schema import Document
+from langchain.chains import RetrievalQA
+
 import db
 
 # Load environment variables from db.py
@@ -24,7 +26,7 @@ def load_pdf_from_path(pdf_path):
         return context
 
 def split_documents(context):
-    text_splitter = RecursiveCharacterTextSplitter(chunk_size=10000, chunk_overlap=200)
+    text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=100)
     return text_splitter.split_text(context)
 
 def initialize_embeddings():
@@ -66,65 +68,93 @@ def get_vector_search(embeddings):
         index_name=db.get_index_name()
     )
 
-def gemini_chatbot(class_selected, subject_selected, chapter_selected, user_question):
+def get_qa_retriever(vector_search):
+    """
+    Get the QA retriever using the vector search object with MongoDB Atlas.
+    """
+    return vector_search.as_retriever(
+        search_type="cosine",
+        search_kwargs={
+            "k": 3,
+            "post_filter_pipeline": [{"$limit": 2}]
+        }
+    )
 
+def get_question_embedding(question, embeddings):
+    # Get the embedding vector for the question
+    return embeddings.embed_query(question)
+
+# def user_query(question, vector_search):
+    
+#     # Implements _get_relevant_documents which retrieves documents relevant to a query.
+#     retriever = vector_search.as_retriever()
+
+#     # Load "stuff" documents chain. Stuff documents chain takes a list of documents,
+#     # inserts them all into a prompt and passes that prompt to an LLM.
+#     model = ChatGoogleGenerativeAI(model="gemini-1.5-flash", temperature=0.3, api_key=google_api_key)
+
+#     qa = RetrievalQA.from_chain_type(model, chain_type="stuff", retriever=retriever)
+
+#     # Execute the chain
+
+#     retriever_output = qa.invoke(question)
+#     print("output :",retriever_output)
+
+
+#     # Return Atlas Vector Search output, and output generated using RAG Architecture
+#     return retriever_output
+    
+#     # return docs
+
+
+def gemini_chatbot(class_selected, subject_selected, chapter_selected, user_question, pdf_path=None):
     # Initialize embeddings
     embeddings = initialize_embeddings()
-    print("embeddings initialize")
-
-    # Load the PDF document from the provided backend path
-    pdf_path = None
-    print("pdf loaded")
 
     if pdf_path:
-        # Load the PDF document from the provided backend path
+        # Load and process the PDF document into chunks
         context = load_pdf_from_path(pdf_path)
-        print("PDF loaded")
-
-        # Process the PDF content into chunks
         texts = split_documents(context)
 
-
         # Store embeddings into MongoDB and initialize vector search
-        # Store the PDF embeddings into MongoDB Atlas
-        vector_index = store_embeddings_in_mongodb(texts, embeddings).as_retriever()
-        print("vector_index")
-
+        vector_search = store_embeddings_in_mongodb(texts, embeddings).as_retriever()
+        # .as_retriever()
     else:
         # If no PDF is provided, use existing MongoDB vector search
-        print("No PDF provided, using MongoDB vector search")
-        vector_index = get_vector_search(embeddings).as_retriever()
+        vector_search = get_vector_search(embeddings).as_retriever()
 
-    # Get relevant documents based on the user's question
-    docs = vector_index.get_relevant_documents(user_question)
-    print("docs")
+    # Get QA retriever from the vector search
+    # qa_retriever = get_qa_retriever(vector_search)
 
-    # Define Prompt Template
+    # Convert user question to embedding vector
+    # question_embedding = get_question_embedding()
+
+    # Perform similarity search with the embedding vector
+    # docs = user_query(user_question, vector_search)
+    docs = vector_search.invoke(user_question)
+    print("retrieved_docs :",docs)
+
+    # Define the prompt template for the response
     prompt_template = """
-    Answer the question as detailed as possible from the provided context,
-    make sure to provide all the details, if the answer is not in
-    provided context just say, "answer is not available in the context",
-    don't provide the wrong answer\n\n
+    Answer the question as detailed as possible from the provided context.
+    If the answer is not in the provided context, give an answer based on your knowledge.
+    Do not provide incorrect information.\n\n
     Context:\n {context}\n
-    Question: \n{question}\n
+    Question:\n{question}\n
     Answer:
     """
 
-    # Create Prompt
+    # Create the prompt
     prompt = PromptTemplate(template=prompt_template, input_variables=['context', 'question'])
-    print("prompt generation")
 
     # Initialize the Gemini model
-    model = ChatGoogleGenerativeAI(model="gemini-pro", temperature=0.3, api_key=google_api_key)
-    print("model initialize")
+    model = ChatGoogleGenerativeAI(model="gemini-1.5-flash", temperature=0.3, api_key=google_api_key)
 
-    # Load QA Chain
+    # Load QA Chain with the "stuff" method
     chain = load_qa_chain(model, chain_type="stuff", prompt=prompt)
-    print("chain of thought's")
-    # Get the response
+
+    # Get the response using the QA retriever and user question
     response = chain.invoke({"input_documents": docs, "question": user_question}, return_only_outputs=True)
-    print("response get")
-    print("response :",response)
 
     # Return the answer
     return response['output_text']
