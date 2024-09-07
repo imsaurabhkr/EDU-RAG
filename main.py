@@ -39,10 +39,10 @@ class MultiApp:
         with st.sidebar:
             app = option_menu(
                 menu_title='Class',
-                options=['Home', 'Account', 'Trending', 'Your Posts', 'about', 'Buy_me_a_coffee'],
+                options=['Account','Home', 'Trending', 'Your Posts', 'about', 'Buy_me_a_coffee'],
                 icons=['house-fill', 'person-circle', 'trophy-fill', 'chat-fill', 'info-circle-fill'],
                 menu_icon='chat-text-fill',
-                default_index=1,
+                default_index=0,
                 styles={
                     "container": {"padding": "5!important", "background-color": 'black'},
                     "icon": {"color": "white", "font-size": "23px"},
