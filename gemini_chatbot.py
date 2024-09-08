@@ -135,12 +135,12 @@ def gemini_chatbot(class_selected, subject_selected, chapter_selected, user_ques
         pdf_text = load_pdf(pdf_path)
         text_chunks = split_text(pdf_text, chunk_size=2000, overlap=200)
         
-        chroma_collection = load_chroma_collection(path="Book/RAG/contents", name="rag_experiment")
+        chroma_collection = load_chroma_collection(path="Books/RAG/contents", name="rag_experiment")
         # Store embeddings
         store_embeddings_in_chroma(text_chunks, chroma_collection)
     else:
         print("No PDF path provided. Using existing Chroma collection.")
-        chroma_collection = load_chroma_collection(path="Book/RAG/contents", name="rag_experiment")
+        chroma_collection = load_chroma_collection(path="Books/RAG/contents", name="rag_experiment")
 
     # print(f"Retrieving answer for question: {user_question}")
     answer = generate_answer_from_db(chroma_collection, query=user_question)
