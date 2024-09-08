@@ -1,160 +1,148 @@
-import PyPDF2
-import io
-from langchain.prompts import PromptTemplate
-from langchain.chains.question_answering import load_qa_chain
-from langchain.text_splitter import RecursiveCharacterTextSplitter
-from langchain_community.vectorstores import MongoDBAtlasVectorSearch
-from langchain_google_genai import GoogleGenerativeAIEmbeddings, ChatGoogleGenerativeAI
-from langchain.schema import Document
-from langchain.chains import RetrievalQA
+import os
+import re
+from pypdf import PdfReader
+import chromadb
+from chromadb import Documents, EmbeddingFunction, Embeddings
+import google.generativeai as genai
+import db  # Import db for fetching the API key
 
-import db
-
-# Load environment variables from db.py
+# Get Google API key from db.py
 google_api_key = db.get_google_api_key()
 
-def load_pdf_from_path(pdf_path):
-    """
-    Load PDF from a given backend path and extract the text content.
-    """
-    print("pdf processing for chunk")
-    with open(pdf_path, "rb") as pdf_file:
-        pdf_reader = PyPDF2.PdfReader(pdf_file)
-        pdf_pages = pdf_reader.pages
-        # Extract text from each page
-        context = "\n\n".join(page.extract_text() for page in pdf_pages)
-        return context
+class GeminiEmbeddingFunction(EmbeddingFunction):
+    def __call__(self, input: Documents) -> Embeddings:
+        if not google_api_key:
+            raise ValueError("Google API Key not provided. Please provide it via db.get_google_api_key()")
+        
+        # print(f"Embedding input: {input}")
+        genai.configure(api_key=google_api_key)
+        model = "models/embedding-001"
+        title = "Custom query"
+        
+        try:
+            embedding_result = genai.embed_content(model=model, content=input, task_type="retrieval_document", title=title)["embedding"]
+            # print("Embedding successfully generated.")
+        except Exception as e:
+            print(f"Error in generating embeddings: {e}")
+            raise e
+        
+        return embedding_result
 
-def split_documents(context):
-    text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=100)
-    return text_splitter.split_text(context)
+def load_pdf(file_path):
+    # print(f"Loading PDF from: {file_path}")
+    reader = PdfReader(file_path)
+    text = "".join([page.extract_text() for page in reader.pages])
+    # print("PDF loaded successfully and text extracted.")
+    return text
 
-def initialize_embeddings():
-    print("embedding initialize")
-    # Initialize Google Generative AI Embeddings
-    return GoogleGenerativeAIEmbeddings(model="models/embedding-001")
-
-def store_embeddings_in_mongodb(texts, embeddings):
-    """
-    Store the PDF text embeddings into MongoDB Atlas.
-    """
-    print("Storing embeddings in MongoDB Atlas")
-    mongo_collection = db.get_mongo_collection()
-    index_name = db.get_index_name()
-
-    # Convert texts to Document objects
-    documents = [Document(page_content=text) for text in texts]
+def split_text(text, chunk_size=2000, overlap=200):
+    chunks = []
+    start = 0
     
-    # Initialize MongoDB vector search with embeddings
-    MongoDBAtlasVectorSearch.from_documents(
-        documents=documents,
-        embedding=embeddings,
-        collection=mongo_collection,
-        index_name=index_name
-    )
+    while start < len(text):
+        end = min(start + chunk_size, len(text))  # Ensure we don't go beyond the length of the text
+        chunks.append(text[start:end])
+        start += chunk_size - overlap  # Move the start forward by chunk_size minus the overlap
+        
+    # print(f"Text split into {len(chunks)} chunks with {chunk_size} characters per chunk and {overlap} character overlap.")
+    return chunks
+
+
+def load_chroma_collection(path, name):
+    # print(f"Loading Chroma collection from path: {path}, with collection name: {name}")
+    chroma_client = chromadb.PersistentClient(path=path)
     
-    return MongoDBAtlasVectorSearch.from_connection_string(
-        db.get_mongo_uri(),
-        f"{db.get_db_name()}.{db.get_collection_name()}",
-        embeddings,
-        index_name=index_name
-    )
-
-def get_vector_search(embeddings):
-    return MongoDBAtlasVectorSearch.from_connection_string(
-        db.get_mongo_uri(),
-        f"{db.get_db_name()}.{db.get_collection_name()}",
-        embeddings,
-        index_name=db.get_index_name()
-    )
-
-def get_qa_retriever(vector_search):
-    """
-    Get the QA retriever using the vector search object with MongoDB Atlas.
-    """
-    return vector_search.as_retriever(
-        search_type="cosine",
-        search_kwargs={
-            "k": 3,
-            "post_filter_pipeline": [{"$limit": 2}]
-        }
-    )
-
-def get_question_embedding(question, embeddings):
-    # Get the embedding vector for the question
-    return embeddings.embed_query(question)
-
-# def user_query(question, vector_search):
+    # Check if the collection exists, create it if not
+    try:
+        db = chroma_client.get_collection(name=name, embedding_function=GeminiEmbeddingFunction())
+        # print(f"Collection '{name}' loaded successfully.")
+    except ValueError:
+        # print(f"Collection '{name}' does not exist. Creating a new collection.")
+        db = chroma_client.create_collection(name=name, embedding_function=GeminiEmbeddingFunction())
+        # print(f"Collection '{name}' created successfully.")
     
-#     # Implements _get_relevant_documents which retrieves documents relevant to a query.
-#     retriever = vector_search.as_retriever()
-
-#     # Load "stuff" documents chain. Stuff documents chain takes a list of documents,
-#     # inserts them all into a prompt and passes that prompt to an LLM.
-#     model = ChatGoogleGenerativeAI(model="gemini-1.5-flash", temperature=0.3, api_key=google_api_key)
-
-#     qa = RetrievalQA.from_chain_type(model, chain_type="stuff", retriever=retriever)
-
-#     # Execute the chain
-
-#     retriever_output = qa.invoke(question)
-#     print("output :",retriever_output)
+    return db
 
 
-#     # Return Atlas Vector Search output, and output generated using RAG Architecture
-#     return retriever_output
+def store_embeddings_in_chroma(text_chunks, chroma_collection):
+    # print("Storing embeddings in Chroma...")
     
-#     # return docs
+    # Generate unique IDs for each text chunk
+    ids = [f"doc_{i}" for i in range(len(text_chunks))]
+    
+    # Add the documents and their IDs to the Chroma collection
+    chroma_collection.add(documents=text_chunks, ids=ids)
+    
+    # print(f"Stored {len(text_chunks)} text chunks in Chroma.")
 
+def get_relevant_passage(query, db, n_results=3):
+    # print(f"Querying Chroma DB for: {query}")
+    results = db.query(query_texts=[query], n_results=n_results)['documents'][0]
+    # print(f"Relevant passage found: {results}")
+    return results
+
+def make_rag_prompt(query, relevant_passage):
+    # print(f"Creating RAG prompt for query: {query}")
+    escaped = relevant_passage.replace("'", "").replace('"', "").replace("\n", " ")
+    # prompt = ("""You are a helpful and informative bot that answers questions using text from the reference passage included below. \
+    #     Be sure to respond in a complete sentence, being comprehensive, including all relevant background information. \
+    #     However, you are talking to a non-technical audience, so be sure to break down complicated concepts and \
+    #     strike a friendly and conversational tone. \
+    #     If the passage is irrelevant to the answer, you may ignore it.
+    #     QUESTION: '{query}'
+    #     PASSAGE: '{relevant_passage}'
+
+    #     ANSWER:""").format(query=query, relevant_passage=escaped)
+    prompt = ("""Answer the question as detailed as possible from the provided context,
+        make sure to provide all the details, if the answer is not in
+        provided context just say, "answer is not available in the context",
+        don't provide the wrong answer\n\n
+        Context:\n {relevant_passage}\n
+        Question: \n{query}\n
+        Answer:""").format(query=query, relevant_passage=escaped)
+    # print("RAG prompt created.")
+    return prompt
+
+def generate_answer(prompt):
+    if not google_api_key:
+        raise ValueError("Google API Key not provided. Please provide it via db.get_google_api_key()")
+    
+    # print(f"Generating answer using Gemini model with prompt: {prompt[:100]}...")  # Only printing part of the prompt for readability
+    genai.configure(api_key=google_api_key)
+    model = genai.GenerativeModel("gemini-1.5-flash")
+    
+    try:
+        answer = model.generate_content(prompt)
+        # print("Answer generated successfully.")
+    except Exception as e:
+        print(f"Error in generating answer: {e}")
+        raise e
+    
+    return answer.text
+
+def generate_answer_from_db(db, query):
+    # print(f"Generating answer for query: {query}")
+    relevant_text = get_relevant_passage(query, db, n_results=3)
+    prompt = make_rag_prompt(query, relevant_passage="".join(relevant_text))
+    answer = generate_answer(prompt)
+    return answer
 
 def gemini_chatbot(class_selected, subject_selected, chapter_selected, user_question, pdf_path=None):
-    # Initialize embeddings
-    embeddings = initialize_embeddings()
-
+    # print(f"Starting chatbot for class: {class_selected}, subject: {subject_selected}, chapter: {chapter_selected}")
+    
     if pdf_path:
-        # Load and process the PDF document into chunks
-        context = load_pdf_from_path(pdf_path)
-        texts = split_documents(context)
-
-        # Store embeddings into MongoDB and initialize vector search
-        vector_search = store_embeddings_in_mongodb(texts, embeddings).as_retriever()
-        # .as_retriever()
+        # Load and process the PDF
+        pdf_text = load_pdf(pdf_path)
+        text_chunks = split_text(pdf_text, chunk_size=2000, overlap=200)
+        
+        chroma_collection = load_chroma_collection(path="Book/RAG/contents", name="rag_experiment")
+        # Store embeddings
+        store_embeddings_in_chroma(text_chunks, chroma_collection)
     else:
-        # If no PDF is provided, use existing MongoDB vector search
-        vector_search = get_vector_search(embeddings).as_retriever()
+        print("No PDF path provided. Using existing Chroma collection.")
+        chroma_collection = load_chroma_collection(path="Book/RAG/contents", name="rag_experiment")
 
-    # Get QA retriever from the vector search
-    # qa_retriever = get_qa_retriever(vector_search)
-
-    # Convert user question to embedding vector
-    # question_embedding = get_question_embedding()
-
-    # Perform similarity search with the embedding vector
-    # docs = user_query(user_question, vector_search)
-    docs = vector_search.invoke(user_question)
-    print("retrieved_docs :",docs)
-
-    # Define the prompt template for the response
-    prompt_template = """
-    Answer the question as detailed as possible from the provided context.
-    If the answer is not in the provided context, give an answer based on your knowledge.
-    Do not provide incorrect information.\n\n
-    Context:\n {context}\n
-    Question:\n{question}\n
-    Answer:
-    """
-
-    # Create the prompt
-    prompt = PromptTemplate(template=prompt_template, input_variables=['context', 'question'])
-
-    # Initialize the Gemini model
-    model = ChatGoogleGenerativeAI(model="gemini-1.5-flash", temperature=0.3, api_key=google_api_key)
-
-    # Load QA Chain with the "stuff" method
-    chain = load_qa_chain(model, chain_type="stuff", prompt=prompt)
-
-    # Get the response using the QA retriever and user question
-    response = chain.invoke({"input_documents": docs, "question": user_question}, return_only_outputs=True)
-
-    # Return the answer
-    return response['output_text']
+    # print(f"Retrieving answer for question: {user_question}")
+    answer = generate_answer_from_db(chroma_collection, query=user_question)
+    # print(f"Answer retrieved: {answer}")
+    return answer
