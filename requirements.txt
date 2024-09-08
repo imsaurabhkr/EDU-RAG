@@ -10,5 +10,5 @@ langchain
 langchain_community
 langchain-google-genai
 chromadb
-
+pypdf
 # gcloud init --skip-diagnostics
