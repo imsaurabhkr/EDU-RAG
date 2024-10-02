@@ -9,6 +9,6 @@ PyPDF2
 langchain
 langchain_community
 langchain-google-genai
-chromadb
+chromadb==0.5.0
 pypdf
 # gcloud init --skip-diagnostics
