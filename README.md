@@ -106,6 +106,3 @@ This project is licensed under the MIT License. See the [LICENSE](LICENSE) file 
 For any questions or inquiries, please contact:
 
 - **Email:** saurabh_k@ma.iitr.ac.in
----
-
-This README file provides a comprehensive overview of your EduRAG project, including setup instructions, usage guidelines, and contribution information. Adjust the content as necessary to fit the specific details and requirements of your project.
